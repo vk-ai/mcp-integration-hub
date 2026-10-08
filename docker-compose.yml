@@ -1,0 +1,30 @@
+# Local stack: dev-mode Vault, the fake SaaS sandbox and the hub.
+#   docker compose up --build
+#   open http://localhost:8000/.well-known/agent-card.json
+# Vault dev mode keeps everything in memory with a fixed root token. Never use it outside a laptop.
+services:
+  vault:
+    image: hashicorp/vault:1.17
+    cap_add: [IPC_LOCK]
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: dev-root
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    ports: ["8200:8200"]
+
+  sandbox:
+    build: .
+    command: ["python", "-c", "import uvicorn; uvicorn.run('mcp_hub.sandbox.fake_saas:app', host='0.0.0.0', port=9000)"]
+    ports: ["9000:9000"]
+
+  hub:
+    build: .
+    environment:
+      MCP_HUB_MODE: sandbox
+      # The browser and the hub must both reach the sandbox at this URL.
+      MCP_HUB_SANDBOX_URL: http://127.0.0.1:9000
+      MCP_HUB_PUBLIC_URL: http://127.0.0.1:8000
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: dev-root
+      MCP_HUB_AUDIT_PATH: /tmp/audit.jsonl
+    network_mode: host
+    depends_on: [vault, sandbox]
