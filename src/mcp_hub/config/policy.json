@@ -1,0 +1,31 @@
+{
+  "roles": {
+    "viewer": {
+      "tools": ["github_list_issues", "slack_list_channels", "hubspot_search_contacts"]
+    },
+    "operator": {
+      "inherits": ["viewer"],
+      "tools": ["github_create_issue", "slack_post_message", "hubspot_create_contact"]
+    },
+    "admin": {
+      "inherits": ["operator"],
+      "tools": ["list_connections", "disconnect"]
+    }
+  },
+  "tools": {
+    "github_list_issues": {"args": {"repo": {"pattern": "acme/[A-Za-z0-9_.-]+"}}},
+    "github_create_issue": {
+      "args": {"repo": {"pattern": "acme/[A-Za-z0-9_.-]+"}},
+      "rate_limit": {"max": 5, "per_seconds": 60}
+    },
+    "slack_list_channels": {},
+    "slack_post_message": {
+      "args": {"channel": {"allow": ["#eng", "#alerts", "C01", "C02"]}},
+      "rate_limit": {"max": 10, "per_seconds": 60}
+    },
+    "hubspot_search_contacts": {},
+    "hubspot_create_contact": {"rate_limit": {"max": 10, "per_seconds": 60}},
+    "list_connections": {},
+    "disconnect": {}
+  }
+}
