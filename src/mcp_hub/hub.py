@@ -17,6 +17,7 @@ from .credentials import CredentialStore, store_from_env
 from .gateway import ToolGateway
 from .oauth import OAuthClient, PendingAuthStore, ProviderConfig
 from .pkce import new_state, new_verifier
+from .pinning import ToolPinStore, tool_to_dict
 from .policy import PolicyEngine, Principal, load_default_policy
 from .tokens import TokenManager
 from .workflows import WorkflowEngine, default_workflows
@@ -44,6 +45,7 @@ class Settings:
     webhook_secrets: dict[str, str]
     api_keys: dict[str, Principal] = field(default_factory=dict)
     mcp_principal: Principal = Principal("mcp-client", "acme", frozenset({"operator"}))
+    tool_pins_path: str | None = None  # set => tool-definition pinning is enforced (MCP_HUB_TOOL_PINS)
 
 
 def _principal(d: dict) -> Principal:
@@ -89,6 +91,8 @@ def settings_from_env() -> Settings:
         s = Settings(providers, hub_base, secrets_, {})
     if os.getenv("MCP_HUB_API_KEYS"):
         s.api_keys = {k: _principal(v) for k, v in json.loads(os.environ["MCP_HUB_API_KEYS"]).items()}
+    if os.getenv("MCP_HUB_TOOL_PINS"):
+        s.tool_pins_path = os.environ["MCP_HUB_TOOL_PINS"]
     if os.getenv("MCP_HUB_PRINCIPAL"):
         s.mcp_principal = _principal(json.loads(os.environ["MCP_HUB_PRINCIPAL"]))
     return s
@@ -105,7 +109,10 @@ class Hub:
         self.tokens = TokenManager(credentials, self.oauth, clock=clock)
         self.policy = PolicyEngine(load_default_policy(), clock=clock)
         self.connectors = SaaSConnectors(http, self.tokens, {p: c.api_base for p, c in settings.providers.items()})
-        self.gateway = ToolGateway(self.policy, self.connectors, audit, clock=clock)
+        self.tool_pins = ToolPinStore(settings.tool_pins_path, clock=clock) if settings.tool_pins_path else None
+        self.gateway = ToolGateway(self.policy, self.connectors, audit, clock=clock, pins=self.tool_pins,
+                                   definitions=self.tool_definitions)
+        self._mcp_server = None
         self.workflows = WorkflowEngine(self.gateway, clock=clock)
         for wf in default_workflows():
             self.workflows.register(wf)
@@ -115,6 +122,40 @@ class Hub:
               audit_path: str | Path | None = None, credentials: CredentialStore | None = None) -> "Hub":
         return cls(settings, http or httpx.AsyncClient(timeout=15), credentials or store_from_env(),
                    AuditLog(audit_path), clock)
+
+    # ---- tool definitions + pinning ------------------------------------------
+    def enable_tool_pinning(self, path: str | Path | None = None) -> ToolPinStore:
+        self.tool_pins = self.gateway.pins = ToolPinStore(path, clock=self.clock)
+        return self.tool_pins
+
+    def attach_mcp_server(self, srv) -> None:
+        """The definitions checked against pins are the ones this server is serving right now."""
+        self._mcp_server = srv
+
+    async def tool_definitions(self) -> dict[str, dict]:
+        if self._mcp_server is None:
+            from .mcp_server import build_mcp_server  # local import: mcp_server imports hub
+            build_mcp_server(self)
+        return {d["name"]: d for d in (tool_to_dict(t) for t in await self._mcp_server.list_tools())}
+
+    async def approve_tools(self, approved_by: str, names: list[str] | None = None) -> dict[str, str]:
+        if self.tool_pins is None:
+            raise RuntimeError("tool pinning is not enabled")
+        defs = await self.tool_definitions()
+        missing = set(names or []) - set(defs)
+        if missing:
+            raise KeyError(f"unknown tools: {sorted(missing)}")
+        out = {}
+        for n in names or sorted(defs):
+            out[n] = self.tool_pins.approve(defs[n], approved_by)["fingerprint"]
+            self.audit.append({"action": "tool_pin_approved", "actor": approved_by, "tool": n, "fingerprint": out[n]})
+        return out
+
+    async def verify_tools(self) -> dict[str, dict]:
+        """name -> {ok, reason, pinned, current, changed} for every served or pinned tool."""
+        defs = await self.tool_definitions()
+        pins = self.tool_pins or ToolPinStore()
+        return {n: pins.check(n, defs.get(n)).__dict__ for n in sorted(set(defs) | set(pins.names()))}
 
     # ---- OAuth connect flow ------------------------------------------------
     def begin_connect(self, principal: Principal, provider: str) -> str:
