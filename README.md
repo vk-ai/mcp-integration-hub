@@ -37,6 +37,7 @@ goes through **RBAC and per-tool policy** and lands in a **hash-chained audit lo
 | Workflows | `event:<type>` and `interval:<seconds>` triggers, templated step arguments (`{event.payload.issue.title}`, `{steps.0.result.length}`), and a service principal that goes through the same policy and audit path. Three are built in: GitHub issue → Slack, HubSpot contact → GitHub follow-up issue, and a daily digest of open issues → Slack. |
 | Credentials | `VaultCredentialStore` (hvac, KV v2, one versioned secret per tenant/provider) when `VAULT_ADDR` is set, otherwise `InMemoryCredentialStore` for tests and dev. Tenant and provider names are validated so they can't be used for path traversal. |
 | RBAC / policy | `config/policy.json` defines `viewer` → `operator` → `admin` with inheritance, default deny for unknown tools, per-tool argument allowlists and regexes (for example, Slack channels and the GitHub org), and per-principal, per-tool rate limits. Denied calls don't use up any rate limit. |
+| Tool pinning | **MCP rug-pull protection** (`pinning.py`). An admin approves tools with `mcp-hub tools approve --by <id>`, which stores a SHA-256 fingerprint of each tool's canonical definition (`name`, `description`, `inputSchema`, `annotations`). With `MCP_HUB_TOOL_PINS` set, every call (MCP, A2A, workflows) re-fingerprints the definition the MCP server is serving *now*; an unpinned or changed tool is denied before policy runs, and the drift is written to the audit chain with the old and new fingerprints and the changed fields. Re-approval is explicit. `mcp-hub tools verify` exits 1 on drift, so it can run in CI. Standard library only. |
 | Audit | JSONL with `seq`, `prev_hash` and `hash`. `verify()` pinpoints the first edited, deleted or reordered entry. Tokens, secrets, codes and `Authorization` headers are redacted before anything is written. |
 
 ## Quickstart
@@ -82,6 +83,7 @@ Use it from an MCP client (stdio):
 | `MCP_HUB_API_KEYS` | three dev keys | JSON `{key: {id, tenant, roles}}` for the HTTP and A2A API |
 | `MCP_HUB_PRINCIPAL` | `mcp-client` / `acme` / `operator` | Who the MCP server acts as |
 | `MCP_HUB_AUDIT_PATH` | `audit.jsonl` | Audit log file |
+| `MCP_HUB_TOOL_PINS` | unset (pinning off) | Pin file for tool-definition pinning. When set, unpinned or changed tools are denied |
 
 ## Demo run
 
@@ -133,7 +135,7 @@ For each core module (OAuth/PKCE, tokens, credentials, policy, audit,
 webhooks, gateway, workflows, MCP server, HTTP/A2A), I wrote the tests before
 the code. The git history keeps that order, with each `test:` commit before
 its `feat:` commit. The fake sandbox (test infrastructure) and the CLI were
-written first and tested afterwards. There are 89 tests, and coverage is about 89% (the CLI is
+written first and tested afterwards. There are 96 tests (the 7 pinning tests were added later, in a feature PR), and coverage is about 89% (the CLI is
 covered by a subprocess test, which isn't counted):
 
 | File | Covers |
@@ -147,6 +149,7 @@ covered by a subprocess test, which isn't counted):
 | `test_mcp_server.py`, `test_stdio.py` | An in-process MCP client, plus a real **stdio subprocess**: tool schemas, calls, policy errors, the reconnect message, no secrets in output |
 | `test_http_app.py` | Agent card, the OAuth connect flow over HTTP, webhook endpoints (including a duplicate and a forged one), A2A send, get and errors, admin-only audit verify |
 | `test_bdd_workflows.py` | **pytest-bdd** scenarios in `tests/features/webhook_workflows.feature` |
+| `test_pinning.py` | Canonical fingerprints (key order ignored; description, schema, annotation and name changes all detected), pin file persistence, off-by-default, unpinned → deny, a **rug pull through a real MCP client** (tool swapped after approval with a poisoned description → blocked, drift audited, chain still verifies), re-approval, the non-MCP call path, and the `tools approve/verify` CLI |
 | `test_credentials.py` | In-memory store, plus a **real Vault** KV v2 store with versioning (`-m vault`) |
 
 CI (`.github/workflows/ci.yml`) runs everything on Python 3.11 and 3.12 with no
@@ -171,6 +174,7 @@ runs the Vault tests and the demo with Vault-backed tokens.
 - **The audit log is tamper-evident, not tamper-proof.** Anyone who can rewrite the file can rebuild the chain; anchoring the hashes externally isn't implemented.
 - **Vault runs in dev mode with a root token.** There's no AppRole, Kubernetes auth or token renewal.
 - **A2A support is minimal.** It covers `message/send` with structured data parts and `tasks/get`, but not streaming, push notifications, cancellation or free-text messages (there's no LLM here to interpret text).
+- **Tool pinning protects against definition changes, not against a tool that was malicious when approved.** The approval is a human looking at the definition; there is no poisoning scanner. The hub's own tools are defined in this repo, so in practice drift here means a code or dependency change; the rug-pull test simulates a swapped definition in-process. Pinning is off unless `MCP_HUB_TOOL_PINS` is set, and the pin file is a plain JSON file (anyone who can write it can re-pin).
 - **The Docker Compose file is untested.** The build machine has no Docker, so the same stack was run as plain processes instead.
 
 ## Layout
@@ -179,7 +183,7 @@ runs the Vault tests and the demo with Vault-backed tokens.
 src/mcp_hub/   pkce · oauth · tokens · credentials (Vault) · policy · audit · webhooks · workflows
                connectors · gateway · hub (wiring) · mcp_server · a2a · http_app · cli
                config/policy.json · sandbox/fake_saas.py
-tests/         89 tests + features/webhook_workflows.feature
+tests/         96 tests + features/webhook_workflows.feature
 demo/          run_demo.py
 ```
 

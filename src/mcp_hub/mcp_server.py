@@ -72,6 +72,11 @@ def build_mcp_server(hub: Hub) -> MCPServer:
     @srv.tool(description="List this tenant's connected providers (no secrets). Admin only.")
     async def list_connections() -> list[dict]:
         p = hub.settings.mcp_principal
+        try:
+            await hub.gateway._check_pin({"action": "tool_call", "actor": p.id, "tenant": p.tenant,
+                                          "tool": "list_connections", "args": {}, "workflow": None}, "list_connections")
+        except PolicyDenied as e:
+            raise ToolError(f"denied by policy: {e.reason}") from e
         d = hub.policy.evaluate(p, "list_connections", {})
         if not d.allowed:
             hub.audit.append({"action": "tool_call", "actor": p.id, "tenant": p.tenant, "tool": "list_connections",
@@ -81,4 +86,5 @@ def build_mcp_server(hub: Hub) -> MCPServer:
                           "decision": "allow", "outcome": "ok"})
         return hub.connections(p.tenant)
 
+    hub.attach_mcp_server(srv)
     return srv
